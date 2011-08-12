@@ -9,7 +9,6 @@ from twisted.python import log
 from bl.utils import getClock, exhaustCall
 from bl.debug import DEBUG
 from bl.filters import BaseFilter
-from bl.scheduler import mtt
 
 
 __all__ = [ 'IPlayer', 'INotePlayer', 'IChordPlayer', 'BasePlayer', 'Player',
@@ -47,11 +46,20 @@ class IPlayable(Interface):
 
 class PlayableMixin(object):
     implements(IPlayable)
-    clock = getClock()
+    clock = None
+    meter = None
+    _playSchedule = None
 
     def startPlaying(self, node=None):
-        self._playSchedule = self.clock.schedule(self.play).startLater(
-            0, self.interval)
+        if self._playSchedule:
+            log.err('Playable %s already started' % self)
+            return
+        ticks = self.meter.measure(self.clock.ticks) * self.meter.ticksPerMeasure
+        if self.clock.ticks > ticks:
+            ticks = self.meter.nextMeasure(self.clock.ticks, 1)
+        ticks = ticks - self.clock.ticks
+        self._playSchedule = self.clock.schedule(self.play).startAfterTicks(
+            ticks, self.interval)
 
     def stopPlaying(self, node=None):
         se = self._playSchedule
@@ -60,13 +68,24 @@ class PlayableMixin(object):
         # you're kind of screwed - though I'm not sure of a nicer way to prevent
         # the non-determinism on something stopping before it starts again when
         # the stop and start are scheduled for the same tick
-
         ticksd = self.clock.ticks % self.meter.ticksPerMeasure
         ticks = self.meter.ticksPerMeasure - 1 - ticksd
         self.clock.callLater(ticks, se.stop)
         self._playSchedule = None
 
-class BasePlayer(PlayableMixin):
+
+
+#class _Activator(object):
+#    clock = getClock()
+#    tempo = None
+#    interval = None
+#
+#    def on(self):
+#        n, d = interval
+#        nextm = self.tempo.dtt(n, d)
+#        self._playSchedule = self.clock.schedule(self.play).startAfterTicks(nextm)
+
+class BasePlayer(PlayableMixin):#, _Activator):
     implements(IPlayer)
 
     def __init__(self, instr, velocity, stop, clock=None, interval=None, meter=None):
@@ -90,7 +109,7 @@ class BasePlayer(PlayableMixin):
         self.interval = interval
         self._scheduledEvent = None
         if meter is None:
-            meter = self.clock.meters[0]
+            meter = self.clock.meter
         self.meter = meter
 
     def play(self):
@@ -102,7 +121,7 @@ class BasePlayer(PlayableMixin):
             return
         if DEBUG:
             log.msg('%s %s %s %s' % (self.instr, n,
-                    self.clock.meters[0].beat(self.clock.ticks), v))
+                    self.clock.meter.beat(self.clock.ticks), v))
         self._on_method(n, v)
         stop = self.stop()
         if stop is not None:
@@ -203,7 +222,7 @@ class SchedulePlayer(PlayableMixin):
         self.clock = getClock(clock)
         self.meter = meter
         if meter is None:
-            self.meter = self.clock.meters[0]
+            self.meter = self.clock.meter
         if type == 'note':
             self._on_method = lambda c, v: self.instr.playnote(c, v)
             self._off_method = lambda c: self.instr.stopnote(c)
@@ -256,7 +275,7 @@ class Conductor(object):
     (other keys into) the graph to randomly transtition to.  The reserved key START
     (equal to None) is for designating which node to start at.  The length of the
     measure is determined by the supplied clock's (or the default global clock's)
-    default Meter (i.e. clock.meters[0]).
+    default Meter (i.e. clock.meter).
 
     An example score graph and conductor:
 
@@ -275,6 +294,7 @@ class Conductor(object):
     """
 
     def __init__(self, scoreGraph, clock=None):
+        warn('Conductor is broken right now. Sorry about that. Might be removed, recoded.')
         self.clock = getClock(clock)
         self.scoreGraph = scoreGraph
         self.currentNode = {'players':()}
@@ -293,7 +313,6 @@ class Conductor(object):
         self.clock.callAfterMeasures(1, self._resume, node)
 
     def _resume(self, node):
-        schedule = self.clock.schedule
         if self._hold:
             node = self._hold
         if node is None:
@@ -606,7 +625,7 @@ class StepSequencer(PlayableMixin):
         if clock is None:
             from bl.scheduler import clock
         if meter is None:
-            meter = clock.meters[0]
+            meter = clock.meter
         self.clock = clock
         self.meter = meter
         self.instr = instr

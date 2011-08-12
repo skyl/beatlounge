@@ -3,7 +3,7 @@ from pprint import pformat
 from twisted.trial.unittest import TestCase, SkipTest
 
 from bl.testlib import ClockRunner, TestReactor
-from bl.scheduler import BeatClock, Meter
+from bl.scheduler import BeatClock, Meter, Tempo
 
 try:
     import pypm
@@ -96,8 +96,9 @@ class MidiDispatcherTests(TestCase, ClockRunner):
 
     def setUp(self):
         checkPypm()
-        self.meters = [ Meter(4,4), Meter(3,4) ]
-        self.clock = BeatClock(135, meters=self.meters, reactor=TestReactor())
+        tempo = Tempo(153)
+        self.meter = Meter(4,4,tempo=tempo)
+        self.clock = BeatClock(tempo=tempo, meter=self.meter, reactor=TestReactor())
         self.midiin = FakeMidiInput()
         self.midiin._buffer.extend([[NOTEON_CHAN1, i%128, 100, 0], i] for i in range(32*3+5))
         self.handler = TestHandler()
@@ -105,7 +106,7 @@ class MidiDispatcherTests(TestCase, ClockRunner):
         self.dispatcher.start()
 
     def test_scheduling(self):
-        self.runTicks(1)
+        self.runTicks(97)
         expected = [ ('noteon', 1, i%128, 100, i) for i in range(64) ]
         self.assertEquals(self.handler.events, expected)
 
@@ -128,7 +129,8 @@ class NoteOnOffHandlerTests(TestCase):
 
     def setUp(self):
         checkPypm()
-        self.clock = BeatClock(135, reactor=TestReactor())
+        tempo = Tempo(135)
+        self.clock = BeatClock(tempo, reactor=TestReactor())
         self.instr1 = TestInstrument(self.clock)
         self.instr2 = TestInstrument(self.clock)
         self.handler = NoteOnOffHandler({1:self.instr1, 2:self.instr2})
@@ -234,7 +236,8 @@ class ClockSenderTests(TestCase, ClockRunner):
 
     def setUp(self):
         checkPypm()
-        self.clock = BeatClock(120, reactor=TestReactor())
+        tempo = Tempo(120)
+        self.clock = BeatClock(tempo, reactor=TestReactor())
         self.patch(pypm, 'Time', FakeTime(self.clock).Time)
         self.midiout = FakeMidiOutput()
         self.clockSender = ClockSender(self.midiout, clock=self.clock)
