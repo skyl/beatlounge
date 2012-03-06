@@ -73,6 +73,11 @@ class FriendlyConsoleManhole(ConsoleManhole):
             self._readHistoryFile()
         self.interpreter.locals['console'] = self
 
+    def initializeScreen(self):
+        # over-riding twisted.conch.recvline.RecvLine
+        self.terminal.write(self.ps[self.pn])
+        self.setInsertMode()
+
     def _readHistoryFile(self):
         self._historySession = os.getpid()
         histFd = self.historyFile + ('.%d' % self._historySession)
