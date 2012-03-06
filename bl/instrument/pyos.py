@@ -1,6 +1,6 @@
 from pyo import (
-    Sine, Port, Sig, Server, Disto, Osc, HarmTable,
-    Adsr, SawTable
+    Sine, Port, SigTo, Server, Disto, Osc, HarmTable,
+    Adsr, SawTable, Noise,
 )
 
 from bl.utils import getClock
@@ -16,15 +16,15 @@ def startPyo():
 
 class MidiAdsrInstrument(object):
 
-    def __init__(self,
-            attack=.01, decay=.1, sustain=.1, release=.01, dur=.121, mul=.5):
+    def __init__(self, attack=.01, decay=.1, sustain=.1, release=.01,
+                 dur=.121, mul=.5, freq_port=.03):
 
         self.adsr = Adsr(
             attack=attack, decay=decay, sustain=sustain, release=release,
             dur=dur, mul=mul
         )
         self.noises = {}
-        self.frequency = Sig(value=0)
+        self.frequency = SigTo(value=0, time=freq_port)
 
     def addNoise(self, name, klass, **kwargs):
         """
@@ -37,54 +37,57 @@ class MidiAdsrInstrument(object):
             n = klass(mul=self.adsr, **kwargs).out()
         self.noises[name] = n
 
-    def playfreq(self, freq):
+    def playfreq(self, freq, mul):
         """
         Sets the frequency signal to `freq` and
         plays the Adsr envelope.
         """
         #self.frequency.value = freq
         if self.frequency.value != freq:
-            self.frequency.set("value", freq, .001)
+            self.frequency.value = freq
+        if mul != self.adsr.mul:
+            self.adsr.mul = mul
         self.adsr.play()
 
     def playnote(self, note, velocity=None):
-        if note:
-            self.playfreq(twelve_tone_equal_440[note])
+        if velocity is None:
+            mul = self.adsr.mul
+        else:
+            mul = velocity / 127.
+        self.playfreq(twelve_tone_equal_440[note], mul)
 
     def stopnote(self, note):
         pass
 
 
 def test_MidiAdsrInstrument():
+    import random
     from itertools import cycle
     from bl.player import R, N, Player
     s = startPyo()
     mai = MidiAdsrInstrument()
     mai.addNoise("sine", Sine)
     mai.addNoise("saw", Osc, table=SawTable())
-    #harml = [1 for e in range(10)]
-    #mai.addNoise("harm", Osc, table=HarmTable(harml))
-    #mai.frequency.set("value", 220)
-    #mai.adsr.play()
 
     notes = cycle([
         R(24, 24, 27, 24, 24, 25, 24, 29, 31, 36, 12, 24, N),
     ])
-    velocity = lambda: 0
+    velocity = lambda: random.choice([80, 60, 120, 20, 30, 10, 5, 1])
     stop = lambda: 0
-    player = Player(mai, notes, velocity, stop=stop, interval=.125)
-    #player.clock.callLater(96, player.startPlaying)
-    #player.clock.callLater(128,
-    #    mai.addNoise, "harm", Osc, table=HarmTable(harml)
-    #)
-    #player = None
-    import IPython
-    IPython.embed()
+    player = Player(mai, notes, velocity, stop=stop, interval=.0625)
+
+    mai.adsr.decay = .01
+    mai.adsr.sustain = .01
+    player.clock.callLater(128, player.startPlaying)
+    player.clock.callLater(512, mai.adsr.setDecay, .07)
+    player.clock.callLater(2048, mai.addNoise, "noise", Noise)
+    player.clock.callLater(2560, mai.adsr.setSustain, .05)
+    harml = [1, .5, .5, .5, .5]
+    player.clock.callLater(1024,
+        mai.addNoise, "harm", Osc, table=HarmTable(harml)
+    )
     return s, mai, player
 
-if __name__ == "__main__":
-    s, m, p = test_MidiAdsrInstrument()
-    p.startPlaying()
 
 class MidiWavesInstrument(object):
     """
@@ -145,7 +148,7 @@ class MidiWavesInstrument(object):
 
         freq = twelve_tone_equal_440[note]
         if velocity:
-            mul = 127. / velocity
+            mul = velocity / 127.
         else:
             mul = 0
 
