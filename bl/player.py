@@ -58,7 +58,6 @@ class PlayableMixin(object):
     def stopPlaying(self, node=None):
         se = self._playSchedule
 
-
         # Stop one tick before the next measure - This means if you try to
         # schedule something at a granularity of 1 you're SOL- though I'm not
         # sure of a nicer way to prevent the non-determinism on something
@@ -114,6 +113,8 @@ class BasePlayer(PlayableMixin):
                     self.clock.meters[0].beat(self.clock.ticks), v))
         self._on_method(n, v)
         stop = self.stop()
+        #if callable(stop):
+        #    stop = stop()
         if stop is not None:
             self.clock.callLater(stop, self._off_method, n)
 
