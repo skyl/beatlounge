@@ -13,7 +13,6 @@ from bl.music.structures.notes import twelve_tone_equal_440
 
 
 def startPyo():
-    from pyo import *
     s = Server().boot()
     s.start()
     return s

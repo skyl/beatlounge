@@ -207,7 +207,6 @@ class FriendlyConsoleManhole(ConsoleManhole):
         self.handle_HOME()
         self.writeHelp('')
 
-
 try:
 
     from twisted.conch.ssh import channel, session, keys, connection
