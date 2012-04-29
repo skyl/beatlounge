@@ -1,9 +1,9 @@
+import random
+
 from twisted.python import reflect
 
 
-<<<<<<< HEAD
 minmax = lambda num, low=0, high=127: min([high, max([low, num])])
-min_max = minmax
 
 
 def flattenLists(li):
@@ -40,7 +40,7 @@ def hertz2bpm(h):
 def percindex(r, lst):
     """Given 0<=r=<1, get the item of the list"""
     try:
-        return lst[int(len(lst) * r)]
+        return lst[int(len(lst - 1) * r)]
     except IndexError:  # wtf?
         return lst[-1]
 
@@ -80,20 +80,6 @@ def bpm_space_to_time(bpm, space):
     return (60. / bpm) * spaces[space]
 
 
-def random_onoff(event, likelihood=[1, 0], frequency=0.125):
-    if not hasattr(event, 'playing'):
-        event.playing = True
-    if random.choice(likelihood):
-        if event.playing:
-            event.stop_at_interval(0)
-            event.playing = False
-        else:
-            event.start(frequency)
-            event.playing = True
-
-
-=======
->>>>>>> 443a1c7f5f2f3c45860bd8460492fa7e470f4f18
 def getClock(clock=None):
     if clock is None:
         from bl.scheduler import BeatClock

@@ -13,7 +13,7 @@ from twisted.conch.stdio import ServerProtocol, ConsoleManhole
 from twisted.python import log, usage
 from twisted.python.filepath import FilePath
 
-from bl.scheduler import Tempo, BeatClock, Meter
+from bl.scheduler import BeatClock, Meter, standardMeter
 
 
 __all__ = ['FriendlyConsoleManhole']
