@@ -1,8 +1,7 @@
-import random
-
 from twisted.python import reflect
 
 
+<<<<<<< HEAD
 minmax = lambda num, low=0, high=127: min([high, max([low, num])])
 min_max = minmax
 
@@ -93,6 +92,8 @@ def random_onoff(event, likelihood=[1, 0], frequency=0.125):
             event.playing = True
 
 
+=======
+>>>>>>> 443a1c7f5f2f3c45860bd8460492fa7e470f4f18
 def getClock(clock=None):
     if clock is None:
         from bl.scheduler import BeatClock

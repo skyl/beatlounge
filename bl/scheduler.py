@@ -1,25 +1,58 @@
 import sys
-#import time
+import math
+import warnings
 
 from collections import namedtuple
-#from functools import wraps
-#from zope.interface import implements
 
 from twisted.python import log
-#from twisted.python.components import proxyForInterface
-#from twisted.internet.interfaces import IReactorTime
-#from twisted.internet.base import ReactorBase
+from twisted.python.failure import Failure
 from twisted.internet.selectreactor import SelectReactor
-#from twisted.internet.defer import Deferred, succeed
 from twisted.internet.task import LoopingCall
 
 from bl.debug import DEBUG
 
-__all__ = ['Beat', 'Meter', 'standardMeter', 'BeatClock', 'measuresToTicks',
-            'mtt', 'ScheduledEvent', 'clock']
 
-_BeatBase = namedtuple(
-    '_BeatBase', 'measure quarter eighth sixteenth remainder')
+__all__ = ['Tempo', 'Beat', 'Meter', 'standardMeter', 'BeatClock',
+           'ScheduledEvent', 'clock']
+
+_BeatBase = namedtuple('_BeatBase',
+                       'measure quarter eighth sixteenth remainder')
+
+
+class Tempo(object):
+    """
+    Tempo gives the tempo in 3 forms for ready access:
+
+        bpm (beats per minute)
+        tpb (ticks per beat)
+        tpm (ticks per minute)
+
+    Do not set these attributes directly, but call reset() instead.  Otherwise,
+    expect unexpected behaviors.
+    """
+
+    def __init__(self, bpm=120, tpb=24):
+        self.bpm = bpm
+        self.tpb = tpb
+        self.tpm = self.bpm * self.tpb
+
+    def reset(self, bpm=None, tpb=None, tpm=None):
+        if bpm:
+            self.bpm = bpm
+        if tpb:
+            self.tpb = tpb
+        if tpm:
+            self.tpm = tpm
+            self.bpm = (tpm / self.tpb)
+            return
+        self.tpm = self.bpm * self.tpb
+
+    def __str__(self):
+        return 'Tempo(bpm=%s, tpb=%s)' % (self.bpm, self.tpb)
+
+
+TEMPO_120_24 = Tempo()
+STANDARD_TICKS_PER_MEASURE = 96
 
 
 class Beat(_BeatBase):
@@ -46,21 +79,24 @@ class Beat(_BeatBase):
 
 class Meter(object):
     """
-    Representation of a Musical meter with methods
-    for representing the current Beat and converting to other related values:
-    the current measure number based on ticks,
-    ticks into the current measure, etc.
+    Representation of a Musical meter with methods for representing the current
+    Beat and converting to other related values: the current measure number
+    based on ticks, ticks into the current measure, etc.
     """
+    strict = True
+    clock = None
 
-    def __init__(self, length=4, division=4, number=1):
+    def __init__(self, length=4, division=4, number=1, tempo=TEMPO_120_24):
         self.length = length
         self.division = division
         self.number = number
-        self._quarters_per_measure = self.length * self.number / (
-                                        self.division / 4.)
         self._hash = hash((self.length, self.division, self.number))
-        self.ticksPerMeasure = int(24 * self.length * 4. /
-                                        self.division * self.number)
+        self.resetTempo(tempo)
+
+    def resetTempo(self, tempo):
+        self.tempo = tempo
+        self.ticksPerMeasure = int(tempo.tpb * self.length * 4. / self.division
+                                   * self.number)
 
     def beat(self, ticks):
         """
@@ -71,18 +107,15 @@ class Meter(object):
         measure, ticks = divmod(ticks, self.ticksPerMeasure)
         if not ticks:
             return Beat(measure, 0, 0, 0, 0)
-        quarter, ticks = divmod(ticks, self.ticksPerMeasure /
-                                        self._quarters_per_measure)
+        quarter, ticks = divmod(ticks, self.tempo.tpb)
         if not ticks:
             return Beat(measure, int(quarter), 0, 0, 0)
-        eighth, ticks = divmod(ticks, self.ticksPerMeasure /
-                                        (self._quarters_per_measure * 2))
+        eighth, ticks = divmod(ticks, self.tempo.tpb / 2)
         if not ticks:
             return Beat(measure, int(quarter), int(eighth), 0, 0)
-        sixteenth, ticks = divmod(ticks, self.ticksPerMeasure /
-                                        (self._quarters_per_measure * 4))
-        return Beat(measure,
-            int(quarter), int(eighth), int(sixteenth), int(ticks))
+        sixteenth, ticks = divmod(ticks, self.tempo.tpb / 4)
+        return Beat(measure, int(quarter), int(eighth), int(sixteenth),
+                    int(ticks))
 
     def ticks(self, ticks):
         """
@@ -92,6 +125,47 @@ class Meter(object):
         ticks: the clock ticks (BeatClock.ticks)
         """
         return ticks % self.ticksPerMeasure
+
+    def divisionToTicks(self, n, d):
+        """
+        Convert n/d (examples 1/4, 3/4, 3/32, 8/4..) For example, if the
+        ticks-per-beat are 24, then n=1 and d=8 would return 12.
+        """
+        tpm = self.tempo.tpb * 4  # Ticks per standard measure 4/4
+        ticks = float(n) / d * tpm
+        _, rem = divmod(ticks, 1)
+        if rem and self.strict:
+            raise ValueError('<divisionToTicks> %s/%s does not evenly divide '
+                             '%s' % (n, d, tpm))
+        elif rem and not self.strict:
+            log.err(Failure(ValueError('<divisionToTicks> %s/%s does not '
+                                       'evenly divide %s'
+                                       % (n, d, tpm))))
+        return int(math.floor(ticks))
+
+    dtt = divisionToTicks
+
+    def nextDivision(self, ticks, n, d):
+        m = self.measure(ticks) * self.ticksPerMeasure
+        offset_ticks = self.divisionToTicks(n, d)
+        next = m + offset_ticks
+        if next < ticks:
+            next = next + self.ticksPerMeasure
+        return next
+
+    nd = nextDivision
+
+    def nextMeasure(self, ticks, measures=1):
+        m = self.measure(ticks) * self.ticksPerMeasure
+        r = m + measures * self.ticksPerMeasure
+        return r
+
+    nm = nextMeasure
+
+    def untilNextMeasure(self, ticks, measures=1):
+        return self.nextMeasure(measures) - ticks
+
+    unm = untilNextMeasure
 
     def measure(self, ticks):
         """
@@ -124,48 +198,45 @@ class SynthControllerMixin(object):
 
 class BeatClock(SelectReactor, SynthControllerMixin):
     """
-    A BeatClock is a meta reactor based on a looping call
-    which is used to keep virtual time based on a given tempo and meter.
+    A BeatClock is a meta reactor based on a looping call which is used to keep
+    virtual time based on a given tempo and meter.
 
-    The current implementation assumes
-    there are  24 ticks (pulses) per quarter note
-    (or 96 ticks per standard measure).
+    The current implementation assumes there are  24 ticks (pulses) per quarter
+    note (or 96 ticks per standard measure).
 
-    In general a runtime should only use one singleton BeatClck,
-    though it's in theory possible to have many running at the same time
-    (waves hands).
+    In general a runtime should only use one singleton BeatClck, though it's in
+    theory possible to have many running at the same time (waves hands).
     """
 
     defaultClock = None
     syncClock = None
 
-    def __init__(self, tempo=130, meters=(), reactor=None, syncClockClass=None,
-                                                                default=False):
+    def __init__(self, tempo=TEMPO_120_24, meter=None, meters=(), reactor=None,
+                 syncClockClass=None, default=False):
         """
-        tempo: The tempo in beats per minute (default: 130)
-
-        meters: Meters used by the clock - default to [ Meter(4,4) ]
-
-        reactor: The underlying reactor to drive this BeatClock -
-            - this defaults to the global reactor
-            (i.e "from twisted.internet import reactor")
-
+        tempo: The tempo object (default: Tempo(120, 24))
+        meter: Meter used by the clock - default to Meter(4,4,tempo=tempo)
+        reactor: The underlying reactor to drive this BeatClock - this defaults
+            to the global reactor (i.e "from twisted.internet import
+            reactor")
         syncClockClass: SyncClock class to use for synchronizing the clock's
-            - ticks and scheduling offset
-            (if None, no SyncClock will be used). See bl.sync.
-
-        default: If True, BeatClock.defaultClock will be set to the instance
-            - used by other components to get the default global BeatClock.
+            ticks and scheduling offset (if None, no SyncClock will be used).
+            See bl.sync.
+        default: If True, BeatClock.defaultClock will be set to the instance -
+            this is used by other components to get the default global
+            BeatClock.
         """
         global clock
         self.tempo = tempo
         self.ticks = 0
-        #self.setTempo(tempo)
-        self._tick_interval = (60. / tempo) * (1. / 24)
         self.meters = meters
         self._meter_schedule = {}
         if not self.meters:
-            self.meters = [Meter(4, 4, 1)]
+            self.meters = [Meter(4, 4, 1, tempo=self.tempo)]
+        else:
+            warnings.warn('meters argument is deprecated, use '
+                          'meter=oneMeterNotAList instead')
+        self.meter = meter or self.meters[0]
         if not reactor:
             from twisted.internet import reactor
         self.reactor = reactor
@@ -180,37 +251,32 @@ class BeatClock(SelectReactor, SynthControllerMixin):
 
     def setTempo(self, tempo):
         """
-        Change the current tempo.
-        Note that this has the side-effect of restarting the underlying task
-        driving the BeatClock and resyncing to the syncClock
-        if there is a syncClock.
+        Change the current tempo.  Note that this has the side-effect of
+        restarting the underlying task driving the BeatClock and resyncing to
+        the syncClock if there is a syncClock.
 
-        BUG: resyncing to SyncClock on tempo changes causes
-        scheduled events not get called for an unreasonable amount of time.
-        Hopefully this will resolved soon,
-        but for the time being don't change the tempo at runtime
-        and set before starting the clock
-        (e.g. with beatlounge command use the -t arg
-        to set the tempo in advance).
+        BUG: resyncing to SyncClock on tempo changes causes scheduled events
+        not get called for an unreasonable amount of time.  Hopefully this will
+        resolved soon, but for the time being don't change the tempo at runtime
+        and set before starting the clock (e.g. with beatlounge command use the
+        -t arg to set the tempo in advance).
 
-        tempo: The tempo (BPM)
+        tempo: The tempo (instance of Tempo)
         """
-        self._tick_interval = (60. / tempo) * (1. / 24)
+        self.tempo = tempo
         if hasattr(self, 'task'):
             self.task.stop()
-            self.task.start(self._tick_interval, True)
-        self.tempo = tempo
-
+            self.task.start(60. / self.tempo.tpm, True)
         if self.syncClock:
             lasttick, ignore = self.syncClock.lastTick()
             self.ticks = lasttick
 
     def run(self):
         """
-        Start the BeatClock.
-        Note that if twisted's reactor has not been started this will start it.
-        This is done for you by bl/console.py (beatlounge command)
-        so you generally should not call this directly in interpreter sessions.
+        Start the BeatClock.  Note that if twisted's reactor has not been
+        started this will start it.  This is done for you by bl/console.py
+        (beatlounge command) so you generally should not call this directly in
+        interpreter sessions.
         """
         self._initBackends()
         self.startTicking()
@@ -219,9 +285,8 @@ class BeatClock(SelectReactor, SynthControllerMixin):
             self.reactor.run()
 
     def _initBackends(self):
-        # XXX this should be refactored some
-        # - make backends pluggable
-        # and indicate which to start from a command line, etc.
+        # XXX this should be refactored some - make backends pluggable and
+        # indicate which to start from a command line, etc.
         try:
             from bl.instrument import fsynth
             if self.synthChannels == 'stereo':
@@ -251,7 +316,7 @@ class BeatClock(SelectReactor, SynthControllerMixin):
         will drive the BeatClock.
         """
         self.task = LoopingCall(self.tick)
-        self.on_stop = self.task.start(self._tick_interval, True)
+        self.on_stop = self.task.start(60. / self.tempo.tpm, True)
 
     def tick(self):
         """
@@ -262,8 +327,7 @@ class BeatClock(SelectReactor, SynthControllerMixin):
             if self.ticks > (ticks + 1):
                 if DEBUG:
                     log.msg("We're ahead by %s ticks, waiting" %
-                                self.ticks - (ticks + 1)
-                    )
+                            self.ticks - (ticks + 1))
                 return
         self.ticks += 1
         self.runUntilCurrent()
@@ -275,8 +339,7 @@ class BeatClock(SelectReactor, SynthControllerMixin):
             if abs(next - ts) > 0.0005:
                 if DEBUG:
                     log.msg('Off by: %3.3fms; skewing time' %
-                                (1000. * (next - ts))
-                    )
+                            (1000. * (next - ts)))
                 self.task._expectNextCallAt -= (next - ts)
 
     def _syncToTick(self, tick, ts):
@@ -287,9 +350,9 @@ class BeatClock(SelectReactor, SynthControllerMixin):
         # TODO - quiet everything somehow
         delta = tick - self.ticks
         if DEBUG:
-            log.msg("We're behind by %s ticks (ticks=%s expected=%s)"
-                                    % (delta, self.ticks, tick))
-        tpm = self.meters[0].ticksPerMeasure
+            log.msg("We're behind by %s ticks (ticks=%s expected=%s)" %
+                    (delta, self.ticks, tick))
+        tpm = self.meter.ticksPerMeasure
         if delta > tpm:
             t = tick % tpm
             ct = self.ticks % tpm
@@ -324,21 +387,20 @@ class BeatClock(SelectReactor, SynthControllerMixin):
 
     def seconds(self):
         """
-        Seconds is the number of ticks since startup
-        or ticks as derived from our SyncClock if we have one.
+        Seconds is the number of ticks since startup or ticks as derived from
+        our SyncClock if we have one.
         """
         return self.ticks
 
     def schedule(self, _f, *args, **kwargs):
         """
-        Schedule a callable to run on a periodic basis.
-        This will return a ScheduledEvent
-        which can be used to start calls to _f and stop
-        based on the clock's meter.
+        Schedule a callable to run on a periodic basis.  This will return a
+        ScheduledEvent which can be used to start calls to _f and stop based on
+        the clock's meter.
 
-        _f: the function to schedule calls to
-        args: positional args to call _f with
-        kwargs: keyword args to call _f
+        @param _f: the function to schedule calls to
+        @param args: positional args to call _f with
+        @param kwargs: keyword args to call _f
         """
         event = ScheduledEvent(self, _f, *args, **kwargs)
         return event
@@ -346,137 +408,80 @@ class BeatClock(SelectReactor, SynthControllerMixin):
     def callWhenRunning(self, *a, **kw):
         return self.reactor.callWhenRunning(*a, **kw)
 
+    # TODO Add callOnDivision
+
+    def untilNextMeasure(self, measures=0):
+        delta = self.meter.nextMeasure(self.ticks, measures) - self.ticks
+        if delta < 0:
+            delta = self.meter.nextMeasure(self.ticks, 1) - self.ticks
+        return delta
+
     def callAfterMeasures(self, measures, f, *a, **kw):
         """
-        Call a function after measures have elapsed.
-        Measures can be a float or 2-tuple
-        (see measuresToTicks for details on how
-        measures are converted to ticks).
+        Call a function after measures have elapsed
 
-        measures: Measures to wait before calling f
-        f: A callable
-        a: postional args to call f with
-        kw: keyword args to call f with
+        @param measures: Measures to wait before calling f
+        @param f: A callable
+        @param a: postional args to call f with
+        @param kw: keyword args to call f with
         """
-        meter = self.meters[0]
-        ticks = _ticks(measures, meter, self)
-        self.callLater(ticks, f, *a, **kw)
+        delta = self.untilNextMeasure()
+        self.callLater(delta, f, *a, **kw)
 
     def nudge(self, pause=0.1):
         """
-        Pause the BeatClock for pause seconds.
-        This is only useful if a syncClock can't be used
-        and you want to manually sync the BeatClock with some external system.
+        Pause the BeatClock for pause seconds.  This is only useful if a
+        syncClock can't be used and you want to manually sync the BeatClock
+        with some external system.
 
-        pause: seconds to nudge
+        @param pause: seconds to nudge
         """
         if not hasattr(self, 'task'):
             raise ValueError("Cannot nudge a clock that hasn't started")
         self.task.stop()
-        self.reactor.callLater(pause, self.task.start,
-                                                    self._tick_interval, True)
-
-
-def measuresToTicks(measures, meter=standardMeter):
-    """
-    short alias: mtt
-
-    Convert measures to ticks.
-    Measures can either be a float or a tuple consisting of
-    the number of whole measures followed by the number of quarter notes.
-    The meter can be specified to aid conversion of measures to ticks
-    since the number of ticks per measure are dependent on the meter
-    (4/4 contains 96, whereas 3/4 contains 72, for example).
-    Note if measures are given as a float,
-    the fractional part of the number is a factor of the standard meter (4/4).
-    So, 0.25 is a quarter and mtt(1.25, Meter(3/4)) will give us 96 ticks
-    (72 for the measure plus 24 for one quarter note (0.25)).
-    This also means that floats are not fully expressive
-    for measures containing more than exactly 4 quarters
-    (examples including 9/8, 11/8, etc);
-    in such cases the tuple representation should be used instead.
-
-    Some examples of measures given a as float:
-
-        >>> mtt(1.5, Meter(4,4)) # 1 whole + 1 half
-        144
-        >>> mtt(1.5, Meter(3,4)) #  1 whole + 1 quarter
-        120
-
-    Some examples of measures given as tuple:
-
-        >>> mtt((1,2), Meter(3,4)) # 1 whole + 1 quarter note
-        120
-        >>> mtt((1,5), Meter(11,8)) # 2 wholes + 1 half + 1 eighth
-        252
-    """
-    if type(measures) in (tuple, list):
-        whole_measures, quarters = measures
-        mantissa = quarters / 4.
-    else:
-        whole_measures = int(measures)
-        mantissa = measures - whole_measures
-    return int(whole_measures * meter.ticksPerMeasure + 96 * mantissa)
-
-mtt = measuresToTicks
-
-
-def _ticks(measures, meter, clock):
-    current_measure = meter.measure(clock.ticks)
-    tickslater = mtt(measures, meter)
-    tick = current_measure * meter.ticksPerMeasure + tickslater
-    ticks = tick - clock.seconds()
-    if ticks < 0:
-        ticks += meter.ticksPerMeasure
-    return ticks
+        self.reactor.callLater(pause, self.task.start, 60. / self.tempo.tpm,
+                               True)
 
 
 class ScheduledEvent(object):
     """
-    A ScheduledEvent is a wrapper around a callable which
-    can be scheduled at a future date with calls repeated for a given
-    interval until stopped.
+    A ScheduledEvent is a wrapper around a callable which can be scheduled at a
+    future date with calls repeated for a given interval until stopped.
     """
-
-    meter = None
 
     def __init__(self, clock, _f, *args, **kwargs):
         self.clock = clock
         self.call = (_f, args, kwargs)
 
-    def startLater(self, measures=1, frequency=0.25, ticks=None, meter=None):
+    def startAfterTicks(self, ticks, interval):
         """
-        Begin calling our callable after measures (or raw ticks if specified).
-        Frequency is the interval in measures to repeat calls to our callable.
-        If a meter is given, this will be used as the basis for
-        converting measures and frequency to ticks;
-        otherwise the events bound meter of the clock's default meter are used
-        for conversion.
-
-        (See measuresToTicks for details on
-        how measures and frequency are converted to clock ticks).
+        Start scheduled event after ticks. Calls to wrapped callable will recur
+        every interval ticks.  This is for raw tick-based schedulingl use
+        startAfter for a simpler metrical api.
         """
-        if measures < 0:
-            raise ValueError("measures must be greater than zero")
-        meter = meter or self.meter or self.clock.meters[0]
-        if ticks is None:
-            #ticks = frequency * standardMeter.ticksPerMeasure
-            # Use meters to ticks for meter-relative frequency
-            ticks = mtt(frequency, meter)
-
-        def _start_later():
-            ticksLater = _ticks(measures, meter, self.clock)
-            #ticksLater = mtt(measures, meter)
-            self.clock.callLater(ticksLater, self.start, ticks, True)
-
-        self.clock.callWhenRunning(_start_later)
+        def _start():
+            self.clock.callLater(ticks, self.start, interval, True)
+        self.clock.callWhenRunning(_start)
         return self
+
+    def startAfter(self, divisions=(1, 1), interval=(1, 4)):
+        """
+        """
+        meter = self.clock.meter
+        ticks = self._divisions(divisions)
+        self.startAfterTicks(ticks, meter.dtt(interval[0], interval[1]))
+        return self
+
+    def _divisions(self, divisions):
+        meter = self.clock.meter
+        ticks = (meter.nd(self.clock.ticks, divisions[0], divisions[1]) -
+                    self.clock.ticks)
+        return ticks
 
     def start(self, ticks=None, now=True):
         """
-        Start calling our target function now.
-        This is called by startLater; generally you
-        should not use this method directly.
+        Start calling our target function now.  This is called by startLater;
+        generally you should not use this method directly.
         """
         def _start():
             self.task = LoopingCall(
@@ -486,36 +491,26 @@ class ScheduledEvent(object):
         self.clock.callWhenRunning(_start)
         return self
 
-    def stopLater(self, measures=1, meter=None, ticks=None):
+    def stopAfterTicks(self, ticks):
         """
-        Stop calling the callable after measures.
-
-        If a meter is given, this will be used as the basis for
-        converting measures and frequency to ticks;
-        otherwise the events bound meter of the clock's default meter are used
-        for conversion.
-
-        (See measuresToTicks for details on
-        how measures are converted to clock ticks).
+        Stop schedule event after ticks. This is for raw tick-based scheduling;
+        use stopAfter for a simpler metrical api.
         """
-
-        meter = meter or self.meter or self.clock.meters[0]
-        ticks_ = ticks
-
-        def _scheduleStop():
-            ticks = ticks_
-            if ticks is None:
-                ticks = _ticks(measures, meter, self.clock)
-                #ticks = mtt(measures, meter)
-
+        def _schedule_stop():
             def _stop():
                 if hasattr(self, 'task'):
                     self.task.stop()
                 else:
-                    log.msg('Tried to stop an event that has not yet started')
-
+                    log.msg('tried to stop an event that has not yet started')
             self.clock.callLater(ticks, _stop)
-        self.clock.callWhenRunning(_scheduleStop)
+        self.clock.callWhenRunning(_schedule_stop)
+        return self
+
+    def stopAfter(self, divisions=(1, 1)):
+        """
+        """
+        ticks = self._divisions(divisions)
+        self.stopAfterTicks(ticks)
         return self
 
     def stop(self):
@@ -525,16 +520,8 @@ class ScheduledEvent(object):
         """
         if hasattr(self, 'task') and self.task.running:
             self.task.stop()
-
-    def bindMeter(self, meter):
-        """
-        Bind a meter to this event. When bound, the meter will be used in calls
-        to startLater() and stopLater() to derive ticks based on measures.
-        If no meter is bound,
-        then in the said calls the clock's default meter will be used.
-        """
-        self.meter = meter
         return self
 
-BPM = 130
-clock = BeatClock(BPM)
+
+clock = BeatClock()
+Meter.clock = clock

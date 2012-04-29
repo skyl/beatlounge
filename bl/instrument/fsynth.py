@@ -1,15 +1,19 @@
+from pprint import pformat
 import os
-#import random
+
 from warnings import warn
-#from twisted.python import log
+
+from zope.interface import implements
 
 from fluidsynth import Synth
 
 from bl.utils import getClock
+from bl.instrument.interfaces import IMIDIInstrument
+
 
 __all__ = ['SynthRouter', 'SynthPool', 'StereoPool', 'QuadPool',
-            'NConnectionPool', 'Instrument', 'MultiInstrument', 'Layer',
-            'suggestDefaultPool']
+           'NConnectionPool', 'Instrument', 'MultiInstrument', 'Layer',
+           'suggestDefaultPool']
 
 
 class SynthRouter:
@@ -32,7 +36,6 @@ class SynthPool:
         self.settings = {}
         self._channel_gen = {}
         if reactor is None:
-            # get the clock
             reactor = getClock()
         self.reactor = reactor
         self.audiodev = audiodev
@@ -46,7 +49,6 @@ class SynthPool:
             self.audiodev = self.reactor.synthAudioDevice
         for connection in self.pool:
             fs = self.pool[connection]
-            #print 'starting synth %s with device %s' % (fs, self.audiodev)
             fs.start(self.audiodev)
 
     def synthObject(self, connection='mono'):
@@ -56,8 +58,9 @@ class SynthPool:
             fs = self.pool[connection]
         else:
             gain, samplerate = self.settings.get(connection, (0.5, 44100))
-            fs = self.router.connections[connection](
-                                            gain=gain, samplerate=samplerate)
+
+            fs = self.router.connections[connection](gain=gain,
+                                                     samplerate=samplerate)
 
             def seq():
                 curr = 0
@@ -68,9 +71,6 @@ class SynthPool:
             self._channel_gen[fs] = seq()
             self.pool[connection] = fs
             if self.reactor.running:
-                #print 'starting synthObject'
-                #print fs
-                #print self.audiodev
                 fs.start(self.audiodev)
         return fs
 
@@ -85,8 +85,9 @@ class SynthPool:
                          channel=None, bank=0, preset=0, sfid=None):
         if sfid is not None:
             return instr.registerSoundfont(sfid, channel or 0)
-        sfid, channel = self.loadSoundFont(
-                                synth, sfpath, channel, bank, preset)
+
+        sfid, channel = self.loadSoundFont(synth, sfpath, channel, bank,
+                                           preset)
         instr.registerSoundfont(sfid, channel)
 
 
@@ -102,7 +103,7 @@ def StereoPool():
 
 def QuadPool():
     router = SynthRouter(fleft=Synth, fright=Synth, bleft=Synth, bright=Synth,
-                                                                mono=Synth)
+                         mono=Synth)
     return SynthPool(router)
 
 
@@ -128,6 +129,7 @@ class ChordPlayerMixin(object):
     strumming = False
 
     def strum(self, notes, velocity=80):
+        # TODO - deprecate this function
         v = lambda: velocity
         if callable(velocity):
             v = lambda: velocity()
@@ -135,22 +137,58 @@ class ChordPlayerMixin(object):
             later = 1
             self.clock.callLater(i * later, self.playnote, note, v())
 
-    def playchord(self, notes, velocity=80):
+    def chordon(self, notes, velocity=80):
         if self.strumming:
             return self.strum(notes, velocity)
         for note in notes:
             self.playnote(note, velocity)
 
-    def stopchord(self, notes):
+    playchord = chordon
+
+    def chordoff(self, notes):
         for note in notes:
             self.stopnote(note)
 
+    stopchord = chordoff
+
     def stopall(self):
         for note in range(128):
-            self.stopnote(note)
+            self.noteoff(note)
+
+
+class Recorder(object):
+
+    def __init__(self, clock=None):
+        self._instruments = {}
+        self.clock = getClock(clock)
+
+    def __call__(self, object, commandname, **arguments):
+        recording = self._instruments.setdefault(object, [])
+        recording.append((self.clock.seconds(), commandname, arguments))
+
+    def __str__(self):
+        s = []
+        write = s.append
+        for instrument in self._instruments:
+            write('Instrument: %s' % instrument)
+            write(pformat(self._instruments[instrument]))
+            write('=' * 80)
+        return '\n'.join(s)
+
+    def toDict(self):
+        d = {}
+        for instrument in self._instruments:
+            # TODO - may have more than one instrument with same
+            # sfpath ...
+            key = os.path.basename(instrument.sfpath)
+            d[key] = self._instruments[instrument]
+        return d
 
 
 class Instrument(ChordPlayerMixin):
+    implements(IMIDIInstrument)
+
+    recorder = None
 
     def __init__(self, sfpath, synth=None, connection='mono',
                  channel=None, bank=0, preset=0, pool=None, clock=None):
@@ -163,34 +201,49 @@ class Instrument(ChordPlayerMixin):
         self._file = os.path.basename(sfpath)
         self.sfpath = sfpath
         self._options = dict(sfpath=sfpath, connection=connection,
-                              channel=channel, bank=bank, preset=preset)
+                             channel=channel, bank=bank, preset=preset)
         pool.connectInstrument(self.synth, self, sfpath, channel=channel,
                                bank=bank, preset=preset)
         self._max_velocity = 127
 
     def __str__(self):
         return 'Instrument path=%s sfid=%s channel=%s' % (
-                            self._file, self.sfid, self.channel)
+                self._file, self.sfid, self.channel)
 
     def registerSoundfont(self, sfid, channel):
-        #print 'registered sound font', self.synth, sfid, channel
         self.sfid = sfid
         self.channel = channel
 
     def cap(self, maxVelocity):
         self._max_velocity = maxVelocity
 
-    def playnote(self, note, velocity=80):
+    def noteon(self, note, velocity=80):
+        if self.recorder is not None:
+            self.recorder(self, 'noteon', note=note, velocity=velocity)
+        if note is None:
+            return
         velocity = min(velocity, self._max_velocity)
-        #print 'playing note', self.synth, self.channel, note, velocity
         self.synth.noteon(self.channel, note, velocity)
 
-    def stopnote(self, note):
-        #print 'stopping note', self.synth, self.channel, note
+    playnote = noteon
+
+    def noteoff(self, note):
+        if self.recorder is not None:
+            self.recorder(self, 'noteoff', note=note)
+        if note is None:
+            return
         self.synth.noteoff(self.channel, note)
 
-    def controlChange(self, vibrato=None, volume=None, pan=None,
-                      expression=None, sustain=None, reverb=None, chorus=None):
+    stopnote = noteoff
+
+    def controlChange(self, vibrato=None, pan=None, expression=None,
+                      sustain=None, reverb=None, chorus=None, **ignored):
+
+        if self.recorder is not None:
+            self.recorder(self, 'controlChange', vibrato=vibrato, pan=pan,
+                          expression=expression, sustain=sustain,
+                          reverb=reverb, chorus=chorus, ignored=ignored)
+
         if vibrato is not None:
             self.synth.cc(self.channel, CC_VIBRATO, vibrato)
         if pan is not None:
@@ -205,6 +258,8 @@ class Instrument(ChordPlayerMixin):
             self.synth.cc(self.channel, CC_CHORUS, chorus)
 
     def pitchBend(self, value):
+        if self.recorder:
+            self.recorder(self, 'pitchBend', value=value)
         self.synth.pitch_bend(self.channel, value)
 
 
@@ -225,17 +280,21 @@ class MultiInstrument(ChordPlayerMixin):
                 else:
                     self._mapping[to] = (instrument, from_)
 
-    def playnote(self, note, velocity=80):
+    def noteon(self, note, velocity=80):
         instr, realNote = self._mapping.get(note, (None, None))
         if instr is None:
             return
-        instr.playnote(realNote, velocity)
+        instr.noteon(realNote, velocity)
 
-    def stopnote(self, note):
+    playnote = noteon
+
+    def noteoff(self, note):
         instr, realNote = self._mapping.get(note, (None, None))
         if instr is None:
             return
-        instr.stopnote(realNote)
+        instr.noteoff(realNote)
+
+    stopnote = noteoff
 
 
 class Layer(ChordPlayerMixin):
@@ -251,19 +310,23 @@ class Layer(ChordPlayerMixin):
             else:
                 self.instruments.append((entry, dict(self.MIDI)))
 
-    def playnote(self, note, velocity=80):
+    def noteon(self, note, velocity=80):
         for (instr, mapping) in self.instruments:
             realNote = mapping.get(note, None)
             if realNote is None:
                 continue
-            instr.playnote(realNote, velocity)
+            instr.noteon(realNote, velocity)
 
-    def stopnote(self, note):
+    playnote = noteon
+
+    def noteoff(self, note):
         for (instr, mapping) in self.instruments:
             realNote = mapping.get(note, None)
             if realNote is None:
                 continue
-            instr.stopnote(realNote)
+            instr.noteoff(realNote)
+
+    stopnote = noteoff
 
 
 def suggestDefaultPool(pool):

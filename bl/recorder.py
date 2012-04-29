@@ -1,6 +1,5 @@
 #from twisted.python import log
 from bl.utils import getClock
-from bl.scheduler import measuresToTicks
 
 
 class LoopRecorder(object):
@@ -18,7 +17,7 @@ class LoopRecorder(object):
         if meter is None:
             meter = self.clock.meters[0]
         self.meter = meter
-        self.period = measuresToTicks(measures, meter=self.meter)
+        self.period = self.meter.ticksPerMeasure * measures
         self._loops = []
         self._buffer = []
         self._last_ticks = self.clock.ticks

@@ -12,15 +12,23 @@ from twisted.internet import stdio, defer
 from twisted.conch.stdio import ServerProtocol, ConsoleManhole
 from twisted.python import log, usage
 from twisted.python.filepath import FilePath
-#from twisted.python import failure, reflect, log, usage
-#from twisted.conch.recvline import HistoricRecvLine
 
-from bl.scheduler import BeatClock, Meter, standardMeter
+from bl.scheduler import Tempo, BeatClock, Meter
+
 
 __all__ = ['FriendlyConsoleManhole']
 
-# Todo - make this an opt flag instead
-EXPERIMENTAL = True
+
+# TODO - make this an opt flag instead
+
+EXPERIMENTAL = False
+
+if sys.platform == 'darwin':
+    defaultAudioDev = 'coreaudio'
+elif sys.platform == 'linux2':
+    defaultAudioDev = 'alsa'
+else:
+    defaultAudioDev = 'portaudio'
 
 if sys.platform == 'darwin':
     defaultAudioDev = 'coreaudio'
@@ -30,17 +38,19 @@ else:
     defaultAudioDev = 'portaudio'
 
 
-def toMeter(s):
+def toMeter(s, tempo):
     count, division = s.split('/')
-    return Meter(int(count), int(division))
+    return Meter(int(count), int(division), tempo=tempo)
 
 
 class Options(usage.Options):
     optParameters = [
-        ['channels', 'c', 'stereo', 'Number of channels: stereo, mono, quad'],
+        ['channels', 'c', 'stereo', 'Number of channels or a label: stereo, '
+         'mono, quad'],
         ['logfile', 'l', 'child.log', 'Path to logfile'],
-        ['tempo', 't', 130, 'The tempo (bpm)', int],
-        ['meter', 'm', standardMeter, 'The meter (default 4/4)', toMeter]
+        ['bpm', 'b', 130, 'The tempo in beats per minute', int],
+        ['tpb', 't', 24, 'Ticks per beat', int],
+        ['meter', 'm', '4/4', 'The meter (default 4/4)']
     ]
 
     def parseArgs(self, audiodev=defaultAudioDev):
@@ -58,11 +68,10 @@ class FriendlyConsoleManhole(ConsoleManhole):
 
     def __init__(self, *p, **kw):
         from bl.utils import buildNamespace
-        namespace = buildNamespace('twisted.internet',
-                'itertools', 'functools', 'collections',
-                'bl.instrument.fsynth', 'bl.player', 'bl.notes',
-                'bl.filters', 'bl.scheduler', 'bl.debug', 'bl.arp',
-                'comps.complib', 'txosc.async', 'bl.osc')
+        namespace = buildNamespace(
+                'twisted.internet', 'itertools', 'functools', 'collections',
+                'bl.instrument.fsynth', 'bl.notes', 'bl.scheduler', 'bl.debug',
+                'bl.arp', 'bl.ugen', 'comps.complib', 'txosc.async', 'bl.osc')
         namespace.update({'random': random})
         self.namespace = namespace
         ConsoleManhole.__init__(self, *p, **kw)
@@ -207,8 +216,8 @@ class FriendlyConsoleManhole(ConsoleManhole):
         self.handle_HOME()
         self.writeHelp('')
 
-try:
 
+try:
     from twisted.conch.ssh import channel, session, keys, connection
     from twisted.conch.client import default, connect, options
     from twisted.conch.client.knownhosts import KnownHostsFile
@@ -270,7 +279,6 @@ try:
                 self.sendEOF()
 
             client = session.SSHSessionClient()
-            #client.dataReceived = dataReceived
             client.connectionLost = connectionLost
 
             conn.console.session = self
@@ -309,21 +317,22 @@ except ImportError, ie:
     warn('%s - connectConsole() will not be avaiable' % ie)
 
 
-def runWithProtocol(klass, audioDev, channels, tempo, meter):
+def runWithProtocol(klass, audioDev, channels, bpm, tpb, meter):
     fd = sys.__stdin__.fileno()
     oldSettings = termios.tcgetattr(fd)
     tty.setraw(fd)
+    tempo = Tempo(bpm, tpb)
+    meter = toMeter(meter, tempo)
     try:
         # TODO - cleaner strategy for collecting parameters and
         # initializing fluidsynth
         # - initializing fluidsynth shouldn't be necessary
         if EXPERIMENTAL:
             from bl.sync import SystemClock
-            clock = BeatClock(
-                tempo=tempo, meters=[meter], default=True,
-                syncClockClass=SystemClock)
+            clock = BeatClock(tempo=tempo, meter=meter, default=True,
+                              syncClockClass=SystemClock)
         else:
-            clock = BeatClock(tempo=tempo, meters=[meter], default=True)
+            clock = BeatClock(tempo=tempo, meter=meter, default=True)
         clock.synthAudioDevice = audioDev
         clock.synthChannels = channels
         p = ServerProtocol(klass)
@@ -342,14 +351,12 @@ def main(argv=None, reactor=None):
     log.startLogging(file(opts['logfile'], 'w'))
     log.msg('audio dev: %s' % opts['audiodev'])
     log.msg('channels: %s' % opts['channels'])
-    log.msg('tempo/BPM: %s' % opts['tempo'])
+    log.msg('tempo/BPM: %s' % opts['bpm'])
+    log.msg('tempo/TPB: %s' % opts['tpb'])
     log.msg('meter: %s' % opts['meter'])
-    runWithProtocol(klass,
-            opts['audiodev'],
-            opts['channels'],
-            opts['tempo'],
-            opts['meter']
-    )
+    runWithProtocol(klass, opts['audiodev'], opts['channels'], opts['bpm'],
+                    opts['tpb'], opts['meter'])
+
 
 if __name__ == '__main__':
     main()
